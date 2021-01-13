@@ -9,7 +9,9 @@ edition = "2018"
 [dependencies]
 push2_display = { git = "https://github.com/mbracher/push2_display" }
 embedded-graphics = "0.7.0-alpha.2"
-midir = "*"
+midir = { version = "0.7", features = ["winrt"] }
 midly = "*"
 rand = "*"
 palette = "0.5"
+serde_yaml = "0.8"
+serde = { version = "1.0", features = ["derive"] }

@@ -1,4 +1,5 @@
 use embedded_graphics::{fonts, pixelcolor::Bgr565, prelude::*, primitives::Rectangle, style::*};
+use entity::*;
 use midir::{Ignore, MidiIO, MidiInput, MidiOutput};
 use midly::{
     live::LiveEvent,
@@ -7,19 +8,22 @@ use midly::{
 };
 use palette::rgb;
 use push2_display::Push2Display;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::vec::Vec;
 use std::{error, sync::mpsc, thread, time};
-use entity::*;
 
 mod entity;
 
 fn select_port<T: MidiIO>(midi_io: &T, descr: &str) -> Result<T::Port, Box<dyn error::Error>> {
     let midi_ports = midi_io.ports();
     for p in midi_ports.iter() {
-        println!("{}", midi_io.port_name(p)?);
         if midi_io.port_name(p)? == descr {
             return Ok(p.clone());
         }
+    }
+    for p in midi_ports.iter() {
+        println!("{}", midi_io.port_name(p)?);
     }
     Err(Box::new(std::io::Error::new(
         std::io::ErrorKind::Other,
@@ -28,31 +32,38 @@ fn select_port<T: MidiIO>(midi_io: &T, descr: &str) -> Result<T::Port, Box<dyn e
 }
 
 struct App<'a> {
-    entities: std::vec::Vec<Box<Entity>>,
+    entities: BTreeMap<usize, Box<Entity>>,
+    fresh_entity_id: usize,
     conn_out: &'a mut midir::MidiOutputConnection,
     display: Push2Display,
-    logo_position: Point,
-    step: i32,
     midi_buffer: Vec<u8>,
     tick: f64,
-    hue: f64,
+    config: &'a mut AppConfig,
+    active_config: u8,
+    assigning: bool,
 }
 
 fn saturate(x: f64) -> f64 {
     1.0 - (-x).exp()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppConfig {
+    assignments: BTreeMap<u8, Box<EntityConfig>>,
+}
+
 impl<'a> App<'a> {
-    fn new(conn_out: &'a mut midir::MidiOutputConnection) -> Self {
+    fn new(conn_out: &'a mut midir::MidiOutputConnection, config: &'a mut AppConfig) -> Self {
         App {
-            entities: std::vec::Vec::new(),
+            entities: BTreeMap::new(),
             conn_out: conn_out,
             display: Push2Display::new().unwrap(),
-            logo_position: Point::new(0, 70),
-            step: 1,
             midi_buffer: Vec::new(),
             tick: 0.0,
-            hue: 0.0,
+            config: config,
+            active_config: 0,
+            assigning: false,
+            fresh_entity_id: 1000,
         }
     }
     fn send(&mut self, message: MidiMessage) {
@@ -95,16 +106,16 @@ impl<'a> App<'a> {
             })
         }
 
+        // hue knob (top right)
         self.send(MidiMessage::Controller {
             controller: u7::new(85),
             value: u7::new(127),
         })
     }
     fn step(&mut self) {
-        self.tick += 1.0;
         let rainbow_velocity = 2.0;
 
-        // Update upper button array
+        // Update button array
         for i in 0..16 {
             let color = palette::Hsv::new(
                 palette::RgbHue::from_degrees(i as f64 * 22.5 + self.tick * rainbow_velocity),
@@ -115,54 +126,123 @@ impl<'a> App<'a> {
             self.set_palette(i + 65, color);
         }
 
-        // Update padsf
+        // Update pads
         for i in 0..8 {
             for j in 0..8 {
-                let mut accum = rgb::Rgb::new(0.0, 0.0, 0.0);
-                for e in &self.entities {
-                    accum += e.render(self.tick, i as f64, j as f64)
+                let pad_id = i + j * 8;
+                let mut accum: rgb::LinSrgb<f64> = rgb::Rgb::new(0.0, 0.0, 0.0);
+                for (_, e) in &self.entities {
+                    accum += e.render(self.tick, i, j)
+                }
+                if self.assigning {
+                    if let Some(cfg) = self.config.assignments.get(&pad_id) {
+                        let color: rgb::LinSrgb<f64> =
+                            palette::Hsv::new(palette::RgbHue::from_degrees(cfg.hue), 1.0, 0.5)
+                                .into();
+                        accum += color;
+                    }
                 }
                 let color = rgb::Rgb::new(
                     saturate(accum.red),
                     saturate(accum.green),
                     saturate(accum.blue),
                 );
-                self.set_palette(1 + i + j * 8, color);
+                self.set_palette(1 + pad_id, color);
             }
         }
 
-        let mut next_entities: Vec<Box<Entity>> = Vec::new();
-        for e in &self.entities {
-            if self.tick < e.t1 {
-                next_entities.push(e.clone())
+        for (i, e) in &self.entities.clone() {
+            if !e.kind.should_gate() && self.tick > e.t1 {
+                self.entities.remove(i);
             }
         }
-        self.entities = next_entities;
+
+        self.tick += 1.0;
     }
+
+    fn save(&self) -> Result<(), Box<dyn error::Error>> {
+        serde_yaml::to_writer(std::fs::File::create("config.yaml")?, self.config)?;
+        Ok(())
+    }
+
+    fn get_active_config(&mut self) -> Box<EntityConfig> {
+        match self.config.assignments.get(&self.active_config) {
+            None => {
+                let obj = Box::new(EntityConfig {
+                    hue: 0.0,
+                    kind: 0,
+                    duration: 15.0,
+                });
+                self.config
+                    .assignments
+                    .insert(self.active_config, obj.clone());
+                obj
+            }
+            Some(cfg) => cfg.clone(),
+        }
+    }
+
     fn handle(&mut self, message: MidiMessage) {
         match message {
-            MidiMessage::NoteOff { key: _, vel: _ } => (),
+            // Hue knob (top right)
             MidiMessage::Controller { controller, value } if controller == u7::new(79) => {
+                let mut cfg = self.get_active_config();
                 if value == u7::new(127) {
-                    self.hue += 1.0;
+                    cfg.hue += 1.0;
                 } else {
-                    self.hue -= 1.0;
+                    cfg.hue -= 1.0;
                 }
-                self.set_palette(127, palette::Hsv::new(self.hue, 1.0, 0.5).into());
+                self.set_palette(127, palette::Hsv::new(cfg.hue, 1.0, 0.5).into());
+                self.config.assignments.insert(self.active_config, cfg);
             }
-            MidiMessage::NoteOn { key, vel } if key >= u7::new(36) && key <= u7::new(99) => {
+            // Jog dial (top left)
+            MidiMessage::Controller { controller, value } if controller == u7::new(14) => {
+                let mut cfg = self.get_active_config();
+                if value == u7::new(127) {
+                    cfg.kind += 1;
+                } else {
+                    cfg.kind -= 1;
+                }
+                self.config.assignments.insert(self.active_config, cfg);
+            }
+            // Duration knob (8th)
+            MidiMessage::Controller { controller, value } if controller == u7::new(78) => {
+                let mut cfg = self.get_active_config();
+                if value == u7::new(127) {
+                    cfg.duration /= 1.03;
+                } else {
+                    cfg.duration *= 1.03;
+                }
+                self.config.assignments.insert(self.active_config, cfg);
+            }
+            // Assign
+            MidiMessage::Controller { controller, value } if controller == u7::new(86) => {
+                self.assigning = value == u7::new(127);
+            }
+            MidiMessage::NoteOn { key, vel: _ } if key >= u7::new(36) && key <= u7::new(99) => {
                 let i = key.as_int() - 36;
                 let x = i % 8;
                 let y = i / 8;
-                let e = Entity {
-                    x: x as f64,
-                    y: y as f64,
-                    t0: self.tick,
-                    t1: self.tick + 15.0,
-                    kind: Animation::Ripple,
-                    color: palette::Hsv::new(self.hue, 1.0, vel.as_int() as f64 / 255.0).into(),
+
+                let prev = self.get_active_config();
+                if !self.config.assignments.contains_key(&i) || self.assigning {
+                    self.config.assignments.insert(i, prev.clone());
+                }
+                self.active_config = i;
+                let cfg = self.get_active_config();
+
+                let eid = if Animation::from_int(cfg.kind).should_gate() {
+                    i as usize
+                } else {
+                    self.fresh_entity_id += 1;
+                    self.fresh_entity_id
                 };
-                self.entities.push(Box::new(e))
+
+                self.entities
+                    .insert(eid, Box::new(Entity::new(&cfg, self.tick, x, y)));
+            }
+            MidiMessage::NoteOff { key, vel: _ } if key >= u7::new(36) && key <= u7::new(99) => {
+                self.entities.remove(&(key.as_int() as usize - 36));
             }
             _ => println!("{:?}", message),
         }
@@ -175,16 +255,13 @@ impl<'a> App<'a> {
             .into_styled(PrimitiveStyle::with_stroke(Bgr565::WHITE, 1))
             .draw(&mut self.display)?;
 
-        self.logo_position.x += self.step;
-        if self.logo_position.x + 400 >= self.display.size().width as i32
-            || self.logo_position.x <= 0
-        {
-            self.step *= -1;
-        }
-
-        fonts::Text::new("DJ Monad Presents", self.logo_position)
-            .into_styled(MonoTextStyle::new(fonts::Font24x32, Bgr565::WHITE))
-            .draw(&mut self.display)?;
+        let cfg = self.get_active_config();
+        fonts::Text::new(
+            &format!("{:?}/{}f", Animation::from_int(cfg.kind), cfg.duration),
+            Point::new(0, 70),
+        )
+        .into_styled(MonoTextStyle::new(fonts::Font12x16, Bgr565::WHITE))
+        .draw(&mut self.display)?;
 
         self.display.flush()?; // if no frame arrives in 2 seconds, the display is turned black
 
@@ -223,17 +300,19 @@ impl<'a> App<'a> {
 pub const SYSEX: &[u8] = &[0xF0, 0x00, 0x21, 0x1D, 0x01, 0x01];
 
 fn main() -> Result<(), Box<dyn error::Error>> {
+    let mut config = serde_yaml::from_reader(std::fs::File::open("config.yaml")?)?;
+
     let mut midi_in = MidiInput::new("midir forwarding input")?;
     midi_in.ignore(Ignore::None);
     let midi_out = MidiOutput::new("midir forwarding output")?;
 
-    let in_port = select_port(&midi_in, "MIDIIN2 (Ableton Push 2)")?;
+    let in_port = select_port(&midi_in, "User Port")?;
     println!();
-    let out_port = select_port(&midi_out, "MIDIOUT2 (Ableton Push 2)")?;
+    let out_port = select_port(&midi_out, "User Port")?;
 
     let mut conn_out = midi_out.connect(&out_port, "midir-forward")?;
 
-    let mut app = App::new(&mut conn_out);
+    let mut app = App::new(&mut conn_out, &mut config);
     app.initialise();
 
     let (tx, rx) = mpsc::channel();
@@ -255,12 +334,24 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         (),
     )?;
 
+    let mut autosave = 0;
     loop {
+        let t0 = std::time::Instant::now();
         for event in rx.try_iter() {
             app.handle(event)
         }
         app.update_display()?;
         app.step();
-        thread::sleep(time::Duration::from_millis(1000 / 60));
+
+        autosave += 1;
+        if autosave % 30 == 0 {
+            app.save()?;
+        }
+
+        let dt = t0.elapsed();
+        let target = time::Duration::from_millis(1000 / 30);
+        if dt < target {
+            thread::sleep(target - dt)
+        }
     }
 }
