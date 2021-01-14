@@ -57,11 +57,11 @@ impl<'a> App<'a> {
     fn new(conn_out: &'a mut midir::MidiOutputConnection, config: &'a mut AppConfig) -> Self {
         App {
             entities: BTreeMap::new(),
-            conn_out: conn_out,
+            conn_out,
             display: Push2Display::new().unwrap(),
             midi_buffer: Vec::new(),
             tick: 0.0,
-            config: config,
+            config,
             active_config: 0,
             assigning: false,
             fresh_entity_id: 1000,
@@ -72,7 +72,7 @@ impl<'a> App<'a> {
         self.midi_buffer.clear();
         let ev = LiveEvent::Midi {
             channel: u4::new(1),
-            message: message,
+            message,
         };
         ev.write(&mut self.midi_buffer).unwrap();
         self.conn_out.send(&self.midi_buffer[..]).unwrap();
@@ -127,7 +127,7 @@ impl<'a> App<'a> {
             for j in 0..8 {
                 let pad_id = i + j * 8;
                 let mut accum: rgb::LinSrgb<f64> = rgb::Rgb::new(0.0, 0.0, 0.0);
-                for (_, e) in &self.entities {
+                for e in self.entities.values() {
                     accum += e.render(self.tick, i, j)
                 }
                 if self.assigning {
@@ -252,7 +252,7 @@ impl<'a> App<'a> {
 
                 let prev = self.get_active_config();
                 if !self.config.assignments.contains_key(&i) || self.assigning {
-                    self.config.assignments.insert(i, prev.clone());
+                    self.config.assignments.insert(i, prev);
                 }
                 self.active_config = i;
                 let cfg = self.get_active_config();
@@ -333,10 +333,10 @@ impl<'a> App<'a> {
     }
 
     fn set_palette(&mut self, i: u8, color: palette::rgb::Srgb<f64>) {
-        let r = (color.red * 255.0).round() as u8;
-        let g = (color.green * 255.0).round() as u8;
-        let b = (color.blue * 255.0).round() as u8;
-        let w = 0;
+        let red = (color.red * 255.0).round() as u8;
+        let green = (color.green * 255.0).round() as u8;
+        let blue = (color.blue * 255.0).round() as u8;
+        let white = 0;
         self.conn_out
             .send(
                 &[
@@ -344,14 +344,14 @@ impl<'a> App<'a> {
                     &[
                         0x03,
                         i,
-                        r & 0x7f,
-                        r >> 7,
-                        g & 0x7f,
-                        g >> 7,
-                        b & 0x7f,
-                        b >> 7,
-                        w & 0x7f,
-                        w >> 7,
+                        red & 0x7f,
+                        red >> 7,
+                        green & 0x7f,
+                        green >> 7,
+                        blue & 0x7f,
+                        blue >> 7,
+                        white & 0x7f,
+                        white >> 7,
                         0xf7,
                     ],
                 ]
@@ -385,14 +385,12 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         &in_port,
         "midir-forward",
         move |_stamp, raw_message, _| {
-            if let Ok(event) = LiveEvent::parse(raw_message) {
-                match event {
-                    LiveEvent::Midi {
-                        channel: _,
-                        message,
-                    } => tx.send(message).unwrap(),
-                    _ => (),
-                }
+            if let Ok(LiveEvent::Midi {
+                channel: _,
+                message,
+            }) = LiveEvent::parse(raw_message)
+            {
+                tx.send(message).unwrap()
             }
         },
         (),

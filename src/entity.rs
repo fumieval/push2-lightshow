@@ -23,12 +23,10 @@ impl Animation {
         }
     }
     pub fn should_gate(&self) -> bool {
-        match self {
-            Animation::VWave => true,
-            Animation::Stream => true,
-            Animation::DropTheBass => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            Animation::VWave | Animation::Stream | Animation::DropTheBass
+        )
     }
 }
 
@@ -130,9 +128,7 @@ impl Entity {
                     .sin()
                     * 0.5
                     + 0.5;
-                if y == self.y {
-                    self.color * intensity * self.decay(t)
-                } else if x == self.x {
+                if y == self.y || x == self.x {
                     self.color * intensity * self.decay(t)
                 } else {
                     rgb::Rgb::new(0.0, 0.0, 0.0)
@@ -153,7 +149,7 @@ impl Entity {
                 ]
                 .contains(&(x, y))
                 {
-                    rgb::Rgb::new(1.0, 1.0, 1.0) * intensity
+                    rgb::Rgb::new(1.0, 0.0, 1.0) * intensity
                 } else if [
                     (4, 0),
                     (4, 1),
@@ -182,7 +178,7 @@ impl Entity {
                 ]
                 .contains(&(x, y))
                 {
-                    rgb::Rgb::new(1.0, 0.0, 0.0) * intensity
+                    rgb::Rgb::new(0.0, 0.0, 1.0) * intensity
                 } else if [
                     (4, 4),
                     (4, 5),
@@ -197,7 +193,7 @@ impl Entity {
                 ]
                 .contains(&(x, y))
                 {
-                    rgb::Rgb::new(1.0, 1.0, 1.0) * intensity
+                    rgb::Rgb::new(0.0, 1.0, 1.0) * intensity
                 } else {
                     rgb::Rgb::new(0.0, 0.0, 0.0)
                 }
