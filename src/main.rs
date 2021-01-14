@@ -185,9 +185,11 @@ impl<'a> App<'a> {
         match knob {
             14 => {
                 if cw {
-                    cfg.kind += 1;
+                    cfg.kind = (cfg.kind + 1) % NUM_ANIMATIONS;
+                } else if cfg.kind > 0 {
+                    cfg.kind = cfg.kind - 1;
                 } else {
-                    cfg.kind -= 1;
+                    cfg.kind = NUM_ANIMATIONS - 1;
                 }
             }
             76 => {
@@ -303,7 +305,7 @@ impl<'a> App<'a> {
                 "{} {} {:?}\n\
                 {} a={:.2}\n\
                 {} b={:.2}\n\
-                {} {:.1}f\n\
+                {} d={:.1}f\n\
                 ",
                 self.focus_marker(10),
                 cfg.kind,

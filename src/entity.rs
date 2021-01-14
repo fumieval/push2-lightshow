@@ -11,6 +11,8 @@ pub enum Animation {
     DropTheBass,
 }
 
+pub const NUM_ANIMATIONS : u8 = 5;
+
 impl Animation {
     pub fn from_int(i: u8) -> Self {
         match i % 5 {
