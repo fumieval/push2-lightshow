@@ -9,7 +9,7 @@ use midly::{
 use palette::rgb;
 use push2_display::Push2Display;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::vec::Vec;
 use std::{error, sync::mpsc, thread, time};
 
@@ -41,6 +41,7 @@ struct App<'a> {
     config: &'a mut AppConfig,
     active_config: u8,
     assigning: bool,
+    focused_knobs: BTreeSet<u8>,
 }
 
 fn saturate(x: f64) -> f64 {
@@ -64,6 +65,7 @@ impl<'a> App<'a> {
             active_config: 0,
             assigning: false,
             fresh_entity_id: 1000,
+            focused_knobs: BTreeSet::new(),
         }
     }
     fn send(&mut self, message: MidiMessage) {
@@ -105,12 +107,6 @@ impl<'a> App<'a> {
                 vel: u7::new(i as u8),
             })
         }
-
-        // hue knob (top right)
-        self.send(MidiMessage::Controller {
-            controller: u7::new(85),
-            value: u7::new(127),
-        })
     }
     fn step(&mut self) {
         let rainbow_velocity = 2.0;
@@ -152,7 +148,7 @@ impl<'a> App<'a> {
         }
 
         for (i, e) in &self.entities.clone() {
-            if !e.kind.should_gate() && self.tick > e.t1 {
+            if e.is_dead(self.tick) {
                 self.entities.remove(i);
             }
         }
@@ -172,6 +168,8 @@ impl<'a> App<'a> {
                     hue: 0.0,
                     kind: 0,
                     duration: 15.0,
+                    alpha: 1.0,
+                    beta: 0.0,
                 });
                 self.config
                     .assignments
@@ -182,43 +180,71 @@ impl<'a> App<'a> {
         }
     }
 
-    fn handle(&mut self, message: MidiMessage) {
-        match message {
-            // Hue knob (top right)
-            MidiMessage::Controller { controller, value } if controller == u7::new(79) => {
-                let mut cfg = self.get_active_config();
-                if value == u7::new(127) {
-                    cfg.hue += 1.0;
-                } else {
-                    cfg.hue -= 1.0;
-                }
-                self.set_palette(127, palette::Hsv::new(cfg.hue, 1.0, 0.5).into());
-                self.config.assignments.insert(self.active_config, cfg);
-            }
-            // Jog dial (top left)
-            MidiMessage::Controller { controller, value } if controller == u7::new(14) => {
-                let mut cfg = self.get_active_config();
-                if value == u7::new(127) {
+    fn dispatch_knob(&mut self, knob: u8, cw: bool) {
+        let mut cfg = self.get_active_config();
+        match knob {
+            14 => {
+                if cw {
                     cfg.kind += 1;
                 } else {
                     cfg.kind -= 1;
                 }
-                self.config.assignments.insert(self.active_config, cfg);
             }
-            // Duration knob (8th)
-            MidiMessage::Controller { controller, value } if controller == u7::new(78) => {
-                let mut cfg = self.get_active_config();
-                if value == u7::new(127) {
-                    cfg.duration /= 1.03;
+            76 => {
+                if cw {
+                    cfg.alpha *= 1.01;
                 } else {
-                    cfg.duration *= 1.03;
+                    cfg.alpha /= 1.01;
                 }
-                self.config.assignments.insert(self.active_config, cfg);
+            }
+            77 => {
+                if cw {
+                    cfg.beta += 0.01;
+                } else {
+                    cfg.beta -= 0.01;
+                }
+            }
+            78 => {
+                if cw {
+                    cfg.duration *= 1.01;
+                } else {
+                    cfg.duration /= 1.01;
+                }
+            }
+            79 => {
+                if cw {
+                    cfg.hue += 1.0;
+                } else {
+                    cfg.hue -= 1.0;
+                }
+            }
+            _ => println!("Knob {}", knob),
+        }
+        self.config.assignments.insert(self.active_config, cfg);
+    }
+
+    fn handle(&mut self, message: MidiMessage) {
+        match message {
+            // Knob rotation
+            MidiMessage::Controller { controller, value }
+                if controller == u7::new(14)
+                    || controller >= u7::new(76) && controller <= u7::new(79) =>
+            {
+                self.dispatch_knob(controller.as_int(), value != u7::new(127))
+            }
+            // Knob touch
+            MidiMessage::NoteOn { key, vel } if key >= u7::new(0) && key <= u7::new(10) => {
+                if vel == u7::new(127) {
+                    self.focused_knobs.insert(key.as_int());
+                } else {
+                    self.focused_knobs.remove(&key.as_int());
+                }
             }
             // Assign
             MidiMessage::Controller { controller, value } if controller == u7::new(86) => {
                 self.assigning = value == u7::new(127);
             }
+            // Pad activation
             MidiMessage::NoteOn { key, vel: _ } if key >= u7::new(36) && key <= u7::new(99) => {
                 let i = key.as_int() - 36;
                 let x = i % 8;
@@ -231,20 +257,34 @@ impl<'a> App<'a> {
                 self.active_config = i;
                 let cfg = self.get_active_config();
 
-                let eid = if Animation::from_int(cfg.kind).should_gate() {
+                let e = Entity::new(&cfg, self.tick, x, y);
+
+                let eid = if e.gated {
                     i as usize
                 } else {
                     self.fresh_entity_id += 1;
                     self.fresh_entity_id
                 };
 
-                self.entities
-                    .insert(eid, Box::new(Entity::new(&cfg, self.tick, x, y)));
+                self.entities.insert(eid, Box::new(e));
             }
             MidiMessage::NoteOff { key, vel: _ } if key >= u7::new(36) && key <= u7::new(99) => {
-                self.entities.remove(&(key.as_int() as usize - 36));
+                let i = key.as_int() as usize - 36;
+                if let Some(e) = self.entities.get(&i) {
+                    let mut obj = e.clone();
+                    obj.release(self.tick);
+                    self.entities.insert(i, obj);
+                }
             }
             _ => println!("{:?}", message),
+        }
+    }
+
+    fn focus_marker(&self, i: u8) -> &str {
+        if self.focused_knobs.contains(&i) {
+            "*"
+        } else {
+            " "
         }
     }
 
@@ -256,11 +296,35 @@ impl<'a> App<'a> {
             .draw(&mut self.display)?;
 
         let cfg = self.get_active_config();
+        let color: rgb::Srgb<f64> =
+            palette::Hsv::new(palette::RgbHue::from_degrees(cfg.hue), 1.0, 0.5).into();
         fonts::Text::new(
-            &format!("{:?}/{}f", Animation::from_int(cfg.kind), cfg.duration),
-            Point::new(0, 70),
+            &format!(
+                "{} {} {:?}\n\
+                {} a={:.2}\n\
+                {} b={:.2}\n\
+                {} {:.1}f\n\
+                ",
+                self.focus_marker(10),
+                cfg.kind,
+                Animation::from_int(cfg.kind),
+                self.focus_marker(5),
+                cfg.alpha,
+                self.focus_marker(6),
+                cfg.beta,
+                self.focus_marker(7),
+                cfg.duration
+            ),
+            Point::new(16, 16),
         )
-        .into_styled(MonoTextStyle::new(fonts::Font12x16, Bgr565::WHITE))
+        .into_styled(MonoTextStyle::new(
+            fonts::Font12x16,
+            Bgr565::new(
+                (color.red * 31.0).round() as u8,
+                (color.green * 63.0).round() as u8,
+                (color.blue * 31.0).round() as u8,
+            ),
+        ))
         .draw(&mut self.display)?;
 
         self.display.flush()?; // if no frame arrives in 2 seconds, the display is turned black
