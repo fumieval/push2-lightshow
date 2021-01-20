@@ -76,12 +76,17 @@ impl Animation {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct EntityConfig {
+    // Envelope function ID
     pub kind: u8,
+    // Base hue
     pub hue: f64,
+    // time constant
     pub duration: f64,
-    // higher = thicker the shape
+    // Factor for the window function. Higher = thicker the shape
     pub alpha: f64,
+    // Multiplier of the distance function
     pub beta: f64,
+    // Distance function ID
     pub distance: u8,
 }
 

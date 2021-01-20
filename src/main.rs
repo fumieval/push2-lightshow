@@ -45,6 +45,7 @@ struct App<'a> {
     focused_knobs: BTreeSet<u8>,
 }
 
+// Saturation function: translate linear color component to [0, 1]
 fn saturate(x: f64) -> f64 {
     1.0 - (-x).exp()
 }
@@ -112,7 +113,6 @@ impl<'a> App<'a> {
     fn step(&mut self) {
         let rainbow_velocity = 2.0;
 
-        /*
         // Update button array
         for i in 0..16 {
             let color = palette::Hsv::new(
@@ -123,7 +123,6 @@ impl<'a> App<'a> {
             .into();
             self.set_palette(i + 65, color);
         }
-        */
 
         // Update pads
         for i in 0..8 {
