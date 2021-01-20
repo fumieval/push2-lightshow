@@ -12,13 +12,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::vec::Vec;
 use std::{error, sync::mpsc, thread, time};
+use regex::Regex;
 
 mod entity;
 
-fn select_port<T: MidiIO>(midi_io: &T, descr: &str) -> Result<T::Port, Box<dyn error::Error>> {
+fn select_port<T: MidiIO>(midi_io: &T, descr: Regex) -> Result<T::Port, Box<dyn error::Error>> {
     let midi_ports = midi_io.ports();
     for p in midi_ports.iter() {
-        if midi_io.port_name(p)? == descr {
+        if descr.is_match(&midi_io.port_name(p)?) {
             return Ok(p.clone());
         }
     }
@@ -111,6 +112,7 @@ impl<'a> App<'a> {
     fn step(&mut self) {
         let rainbow_velocity = 2.0;
 
+        /*
         // Update button array
         for i in 0..16 {
             let color = palette::Hsv::new(
@@ -121,21 +123,23 @@ impl<'a> App<'a> {
             .into();
             self.set_palette(i + 65, color);
         }
+        */
 
         // Update pads
         for i in 0..8 {
             for j in 0..8 {
                 let pad_id = i + j * 8;
                 let mut accum: rgb::LinSrgb<f64> = rgb::Rgb::new(0.0, 0.0, 0.0);
-                for e in self.entities.values() {
-                    accum += e.render(self.tick, i, j)
-                }
                 if self.assigning {
                     if let Some(cfg) = self.config.assignments.get(&pad_id) {
                         let color: rgb::LinSrgb<f64> =
                             palette::Hsv::new(palette::RgbHue::from_degrees(cfg.hue), 1.0, 0.5)
                                 .into();
                         accum += color;
+                    }
+                } else {
+                    for e in self.entities.values() {
+                        accum += e.render(self.tick, i, j)
                     }
                 }
                 let color = rgb::Rgb::new(
@@ -170,6 +174,7 @@ impl<'a> App<'a> {
                     duration: 15.0,
                     alpha: 1.0,
                     beta: 0.0,
+                    distance: 0,
                 });
                 self.config
                     .assignments
@@ -183,6 +188,8 @@ impl<'a> App<'a> {
     fn dispatch_knob(&mut self, knob: u8, cw: bool) {
         let mut cfg = self.get_active_config();
         match knob {
+            3 if cw => cfg.distance -= 1,
+            9 if cw => cfg.distance += 1,
             14 => {
                 if cw {
                     cfg.kind = (cfg.kind + 1) % NUM_ANIMATIONS;
@@ -229,8 +236,8 @@ impl<'a> App<'a> {
         match message {
             // Knob rotation
             MidiMessage::Controller { controller, value }
-                if controller == u7::new(14)
-                    || controller >= u7::new(76) && controller <= u7::new(79) =>
+                if controller == u7::new(14) ||  controller == u7::new(3) ||  controller == u7::new(9)
+                    || controller >= u7::new(72) && controller <= u7::new(79) =>
             {
                 self.dispatch_knob(controller.as_int(), value != u7::new(127))
             }
@@ -242,10 +249,7 @@ impl<'a> App<'a> {
                     self.focused_knobs.remove(&key.as_int());
                 }
             }
-            // Assign
-            MidiMessage::Controller { controller, value } if controller == u7::new(86) => {
-                self.assigning = value == u7::new(127);
-            }
+
             // Pad activation
             MidiMessage::NoteOn { key, vel: _ } if key >= u7::new(36) && key <= u7::new(99) => {
                 let i = key.as_int() - 36;
@@ -278,6 +282,11 @@ impl<'a> App<'a> {
                     self.entities.insert(i, obj);
                 }
             }
+            // Assign mode
+            MidiMessage::Controller { controller, value } if controller == u7::new(86) => {
+                self.assigning = value == u7::new(127);
+            }
+            MidiMessage::Aftertouch { .. } => (), // don't care about aftertouch for now
             _ => println!("{:?}", message),
         }
     }
@@ -302,14 +311,14 @@ impl<'a> App<'a> {
             palette::Hsv::new(palette::RgbHue::from_degrees(cfg.hue), 1.0, 0.5).into();
         fonts::Text::new(
             &format!(
-                "{} {} {:?}\n\
+                "{} {} {:?}/{:?}\n\
                 {} a={:.2}\n\
                 {} b={:.2}\n\
                 {} d={:.1}f\n\
                 ",
                 self.focus_marker(10),
                 cfg.kind,
-                Animation::from_int(cfg.kind),
+                Animation::from_int(cfg.kind), Distance::from_int(cfg.distance),
                 self.focus_marker(5),
                 cfg.alpha,
                 self.focus_marker(6),
@@ -372,9 +381,9 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     midi_in.ignore(Ignore::None);
     let midi_out = MidiOutput::new("midir forwarding output")?;
 
-    let in_port = select_port(&midi_in, "User Port")?;
+    let in_port = select_port(&midi_in, Regex::new("User Port$")?)?;
     println!();
-    let out_port = select_port(&midi_out, "User Port")?;
+    let out_port = select_port(&midi_out, Regex::new("User Port$")?)?;
 
     let mut conn_out = midi_out.connect(&out_port, "midir-forward")?;
 
